@@ -5,8 +5,6 @@ Wants=cups.service
 
 [Service]
 Type=simple
-User=pi
-Group=lp
 WorkingDirectory=/opt/print-server
 Environment=PYTHONUNBUFFERED=1
 Environment=PORT=8000
