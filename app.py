@@ -3,6 +3,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -11,6 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
+IS_WINDOWS = sys.platform == "win32"
 MAX_FILE_SIZE = 25 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
 ALLOWED_MIME_TYPES = {
@@ -19,7 +22,7 @@ ALLOWED_MIME_TYPES = {
     "image/jpeg",
     "image/jpg",
 }
-DEFAULT_TEMP_DIR = Path(os.environ.get("TEMP_DIR", "/tmp/print_jobs"))
+DEFAULT_TEMP_DIR = Path(os.environ.get("TEMP_DIR", Path(tempfile.gettempdir()) / "print_jobs"))
 DEFAULT_PRINTER_ENV = os.environ.get("PRINTER_NAME", "").strip() or None
 
 app = FastAPI(title="Web Print Server", docs_url=None, redoc_url=None)
@@ -34,11 +37,20 @@ app.add_middleware(
 
 def sanitize_printer_name(name: str) -> str:
     cleaned = name.strip()
-    if not re.match(r"^[a-zA-Z0-9_\-]+$", cleaned):
+    if not re.match(r"^[a-zA-Z0-9_\-\s\(\)\.]+$", cleaned):
         raise ValueError("Invalid printer name characters.")
     return cleaned
 
 def get_available_printers() -> List[str]:
+    if IS_WINDOWS:
+        try:
+            import win32print
+            flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+            printers = [p[2] for p in win32print.EnumPrinters(flags)]
+            return sorted(list(dict.fromkeys(printers)))
+        except Exception:
+            return []
+
     try:
         result = subprocess.run(
             ["lpstat", "-e"],
@@ -78,6 +90,15 @@ def get_default_printer() -> Optional[str]:
     if DEFAULT_PRINTER_ENV:
         return DEFAULT_PRINTER_ENV
 
+    if IS_WINDOWS:
+        try:
+            import win32print
+            return win32print.GetDefaultPrinter()
+        except Exception:
+            pass
+        printers = get_available_printers()
+        return printers[0] if printers else None
+
     try:
         result = subprocess.run(
             ["lpstat", "-d"],
@@ -100,6 +121,97 @@ def get_default_printer() -> Optional[str]:
         return printers[0]
 
     return None
+
+def print_windows(file_path: Path, printer_name: str, copies: int = 1) -> None:
+    import win32con
+    import win32print
+    import win32ui
+    from PIL import Image, ImageWin
+
+    ext = file_path.suffix.lower()
+    pages_to_print = []
+
+    if ext == ".pdf":
+        import pypdfium2 as pdfium
+        pdf = pdfium.PdfDocument(file_path)
+        for page in pdf:
+            rendered = page.render(scale=2.5).to_pil()
+            if rendered.mode != "RGB":
+                rendered = rendered.convert("RGB")
+            pages_to_print.append(rendered)
+        pdf.close()
+    else:
+        img = Image.open(file_path)
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            mask = img.split()[-1] if len(img.split()) == 4 else None
+            bg.paste(img, mask=mask)
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        pages_to_print.append(img)
+
+    hDC = win32ui.CreateDC()
+    hDC.CreatePrinterDC(printer_name)
+    try:
+        hDC.StartDoc(file_path.name)
+        printable_width = hDC.GetDeviceCaps(win32con.HORZRES)
+        printable_height = hDC.GetDeviceCaps(win32con.VERTRES)
+
+        for _ in range(copies):
+            for page_img in pages_to_print:
+                hDC.StartPage()
+                img_w, img_h = page_img.size
+                scale = min(printable_width / img_w, printable_height / img_h)
+                draw_w = int(img_w * scale)
+                draw_h = int(img_h * scale)
+                x = (printable_width - draw_w) // 2
+                y = (printable_height - draw_h) // 2
+
+                dib = ImageWin.Dib(page_img)
+                dib.draw(hDC.GetHandleOutput(), (x, y, x + draw_w, y + draw_h))
+                hDC.EndPage()
+
+        hDC.EndDoc()
+    finally:
+        hDC.DeleteDC()
+
+def print_linux_cups(file_path: Path, printer_name: str, copies: int = 1, fit_to_page: bool = True) -> None:
+    cmd = ["lp", "-d", printer_name, "-n", str(copies)]
+    if fit_to_page:
+        cmd.extend(["-o", "fit-to-page"])
+    cmd.append(str(file_path))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Print command timed out after 30 seconds.",
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="CUPS 'lp' executable was not found.",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Execution error: {str(e)}",
+        )
+
+    if result.returncode != 0:
+        err_msg = result.stderr.strip() or result.stdout.strip() or "Unknown CUPS error"
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"CUPS error: {err_msg}",
+        )
 
 def execute_print(
     file_path: Path,
@@ -128,47 +240,29 @@ def execute_print(
             detail="Number of copies must be between 1 and 99.",
         )
 
-    cmd = ["lp", "-d", target_printer, "-n", str(copies)]
-    if fit_to_page:
-        cmd.extend(["-o", "fit-to-page"])
-    cmd.append(str(file_path))
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Print command timed out after 30 seconds.",
-        )
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="CUPS 'lp' executable was not found. Please install cups-client.",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Execution error: {str(e)}",
-        )
-
-    if result.returncode != 0:
-        err_msg = result.stderr.strip() or result.stdout.strip() or "Unknown CUPS error"
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"CUPS error: {err_msg}",
+    if IS_WINDOWS:
+        try:
+            print_windows(file_path=file_path, printer_name=target_printer, copies=copies)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Windows print error: {str(e)}",
+            )
+    else:
+        print_linux_cups(
+            file_path=file_path,
+            printer_name=target_printer,
+            copies=copies,
+            fit_to_page=fit_to_page,
         )
 
     return target_printer
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "platform": "windows" if IS_WINDOWS else "linux"}
 
 @app.get("/manifest.json")
 def get_manifest():
