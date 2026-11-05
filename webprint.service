@@ -7,9 +7,9 @@ Wants=cups.service
 Type=simple
 WorkingDirectory=/opt/print-server
 Environment=PYTHONUNBUFFERED=1
-Environment=PORT=8000
+Environment=PORT=5000
 Environment=PRINTER_NAME=
-ExecStart=/opt/print-server/venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 8000
+ExecStart=/opt/print-server/venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 5000
 Restart=always
 RestartSec=5
 PrivateTmp=true

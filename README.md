@@ -7,12 +7,15 @@ Lightweight, single-page self-hosted web printing service for local home network
 ## Features
 
 - **Mobile First (iOS & Android):** Apple Human Interface Guidelines look-and-feel with automatic dark mode, touch feedback, and Web App Manifest for native Home Screen installation on both iOS and Android.
+- **Interactive Document Preview:** Instant rendering of document pages (PDF and images) with page thumbnail cards.
+- **Selective Page Printing:** Tap to select/deselect individual pages to print only what you need, with "Select All" and "Deselect All" convenience buttons.
+- **Color & Grayscale Modes:** Native iOS-style segmented picker for Color and Black & White (monochrome) printing.
 - **Universal Format Support:** Prints `.pdf`, `.png`, `.jpg`, and `.jpeg` files up to 25 MB.
 - **Cross-Platform Printing Engine:**
   - **Windows (e.g. Windows Home laptop):** Silent native printing via Windows GDI Spooler (`win32print`, `win32ui`, `Pillow`, `pypdfium2`). Supports multi-page PDFs with automatic page scaling and centering, zero GUI dialogs or popups.
   - **Linux (Debian/Ubuntu/Raspberry Pi):** Direct execution via CUPS CLI (`lp`, `lpstat`).
 - **Printer Auto-Detection:** Automatically enumerates all installed local and network printers and resolves the system default printer.
-- **Zero Overhead:** Native Python 3 + FastAPI running directly on the host (less than 35 MB RAM, instant startup, no virtualization or Docker overhead).
+- **Zero Overhead:** Native Python 3 + FastAPI running directly on the host (less than 35 MB RAM, instant startup, runs on port 5000).
 - **Secure File Lifecycle:** Temporary files created with unique UUIDs and guaranteed immediate cleanup in `finally` blocks.
 
 ---
@@ -33,7 +36,7 @@ Double-click `run.bat` or run:
 ```powershell
 python app.py
 ```
-The server will bind to `0.0.0.0:8000` and is immediately accessible on your local network.
+The server binds to `0.0.0.0:5000` and is immediately accessible on your local network.
 
 ### 4. Optional: Autostart on Windows Boot
 Press `Win + R`, type `shell:startup`, and press Enter. Create a shortcut to `run.bat` (or use Task Scheduler to run `pythonw app.py` on login without a command window).
@@ -61,20 +64,13 @@ sudo systemctl enable --now webprint.service
 
 ---
 
-## Android & iOS Compatibility
-
-- **iOS (Mobile Safari):** Supports camera roll, Files app picker, and PWA mode via `Share -> Add to Home Screen`.
-- **Android (Chrome / Firefox / Edge):** Fully compatible. The file selector natively opens Android's system document and media picker. Chrome provides an install banner to add the app directly to the launcher as a standalone PWA.
-
----
-
 ## Configuration
 
 Optional environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `8000` | HTTP port |
+| `PORT` | `5000` | HTTP port |
 | `PRINTER_NAME` | `""` (auto-detect) | Hardcoded target printer name |
 | `TEMP_DIR` | System Temp `/print_jobs` | Temporary storage for incoming jobs |
 
@@ -86,7 +82,8 @@ Optional environment variables:
 - `GET /health`: Health check endpoint
 - `GET /manifest.json`: Web App Manifest for mobile installation
 - `GET /api/printers`: Discovered printers and default queue
-- `POST /api/print`: Multipart form upload (`file`, `printer`, `copies`)
+- `POST /api/preview`: Generates page thumbnail previews (`data:image/jpeg;base64,...`)
+- `POST /api/print`: Multipart form upload (`file`, `printer`, `copies`, `color_mode`, `pages`)
 
 ---
 

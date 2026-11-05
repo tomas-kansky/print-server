@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import os
 import re
@@ -7,7 +9,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -122,7 +124,13 @@ def get_default_printer() -> Optional[str]:
 
     return None
 
-def print_windows(file_path: Path, printer_name: str, copies: int = 1) -> None:
+def print_windows(
+    file_path: Path,
+    printer_name: str,
+    copies: int = 1,
+    color_mode: str = "color",
+    selected_pages: Optional[Set[int]] = None,
+) -> None:
     import win32con
     import win32print
     import win32ui
@@ -134,13 +142,22 @@ def print_windows(file_path: Path, printer_name: str, copies: int = 1) -> None:
     if ext == ".pdf":
         import pypdfium2 as pdfium
         pdf = pdfium.PdfDocument(file_path)
-        for page in pdf:
+        for page_idx, page in enumerate(pdf, start=1):
+            if selected_pages is not None and page_idx not in selected_pages:
+                continue
             rendered = page.render(scale=2.5).to_pil()
-            if rendered.mode != "RGB":
+            if color_mode == "bw":
+                rendered = rendered.convert("L").convert("RGB")
+            elif rendered.mode != "RGB":
                 rendered = rendered.convert("RGB")
             pages_to_print.append(rendered)
         pdf.close()
     else:
+        if selected_pages is not None and 1 not in selected_pages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The single image page was unselected.",
+            )
         img = Image.open(file_path)
         if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
             bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -149,7 +166,17 @@ def print_windows(file_path: Path, printer_name: str, copies: int = 1) -> None:
             img = bg
         elif img.mode != "RGB":
             img = img.convert("RGB")
+
+        if color_mode == "bw":
+            img = img.convert("L").convert("RGB")
+
         pages_to_print.append(img)
+
+    if not pages_to_print:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pages selected for printing.",
+        )
 
     hDC = win32ui.CreateDC()
     hDC.CreatePrinterDC(printer_name)
@@ -176,10 +203,28 @@ def print_windows(file_path: Path, printer_name: str, copies: int = 1) -> None:
     finally:
         hDC.DeleteDC()
 
-def print_linux_cups(file_path: Path, printer_name: str, copies: int = 1, fit_to_page: bool = True) -> None:
+def print_linux_cups(
+    file_path: Path,
+    printer_name: str,
+    copies: int = 1,
+    fit_to_page: bool = True,
+    color_mode: str = "color",
+    selected_pages: Optional[Set[int]] = None,
+) -> None:
     cmd = ["lp", "-d", printer_name, "-n", str(copies)]
     if fit_to_page:
         cmd.extend(["-o", "fit-to-page"])
+
+    if color_mode == "bw":
+        cmd.extend(["-o", "print-color-mode=monochrome", "-o", "ColorModel=Gray"])
+    else:
+        cmd.extend(["-o", "print-color-mode=color", "-o", "ColorModel=RGB"])
+
+    if selected_pages is not None:
+        sorted_pages = sorted(list(selected_pages))
+        if sorted_pages:
+            cmd.extend(["-P", ",".join(str(p) for p in sorted_pages)])
+
     cmd.append(str(file_path))
 
     try:
@@ -218,6 +263,8 @@ def execute_print(
     printer_name: Optional[str] = None,
     copies: int = 1,
     fit_to_page: bool = True,
+    color_mode: str = "color",
+    selected_pages: Optional[Set[int]] = None,
 ) -> str:
     target_printer = printer_name or get_default_printer()
     if not target_printer:
@@ -242,7 +289,13 @@ def execute_print(
 
     if IS_WINDOWS:
         try:
-            print_windows(file_path=file_path, printer_name=target_printer, copies=copies)
+            print_windows(
+                file_path=file_path,
+                printer_name=target_printer,
+                copies=copies,
+                color_mode=color_mode,
+                selected_pages=selected_pages,
+            )
         except HTTPException:
             raise
         except Exception as e:
@@ -256,6 +309,8 @@ def execute_print(
             printer_name=target_printer,
             copies=copies,
             fit_to_page=fit_to_page,
+            color_mode=color_mode,
+            selected_pages=selected_pages,
         )
 
     return target_printer
@@ -292,11 +347,89 @@ def list_printers():
         "default": default_p,
     }
 
+@app.post("/api/preview")
+async def generate_preview(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No file selected.",
+        )
+
+    file_ext = Path(file.filename).suffix.lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file extension '{file_ext}'.",
+        )
+
+    DEFAULT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = DEFAULT_TEMP_DIR / f"preview_{uuid.uuid4()}{file_ext}"
+
+    try:
+        total_bytes = 0
+        with open(temp_path, "wb") as buffer:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="File exceeds maximum allowed size.",
+                    )
+                buffer.write(chunk)
+
+        thumbnails = []
+        if file_ext == ".pdf":
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(temp_path)
+            for page in pdf:
+                pil_img = page.render(scale=0.45).to_pil()
+                if pil_img.mode != "RGB":
+                    pil_img = pil_img.convert("RGB")
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=75)
+                b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                thumbnails.append(f"data:image/jpeg;base64,{b64}")
+            pdf.close()
+        else:
+            from PIL import Image
+            img = Image.open(temp_path)
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                mask = img.split()[-1] if len(img.split()) == 4 else None
+                bg.paste(img, mask=mask)
+                img = bg
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+            img.thumbnail((400, 400))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=75)
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            thumbnails.append(f"data:image/jpeg;base64,{b64}")
+
+        return {
+            "success": True,
+            "filename": file.filename,
+            "count": len(thumbnails),
+            "pages": thumbnails,
+        }
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        await file.close()
+
 @app.post("/api/print")
 async def submit_print_job(
     file: UploadFile = File(...),
     printer: Optional[str] = Form(None),
     copies: int = Form(1),
+    color_mode: str = Form("color"),
+    pages: Optional[str] = Form(None),
 ):
     if not file.filename:
         raise HTTPException(
@@ -310,6 +443,19 @@ async def submit_print_job(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"Unsupported file extension '{file_ext}'. Allowed formats: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
+
+    selected_pages_set: Optional[Set[int]] = None
+    if pages and pages.strip():
+        try:
+            parts = [p.strip() for p in pages.split(",") if p.strip()]
+            selected_pages_set = {int(p) for p in parts if int(p) > 0}
+            if not selected_pages_set:
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid pages parameter. Must be comma-separated integers.",
+            )
 
     DEFAULT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     job_id = str(uuid.uuid4())
@@ -341,6 +487,8 @@ async def submit_print_job(
             printer_name=printer.strip() if printer else None,
             copies=copies,
             fit_to_page=True,
+            color_mode=color_mode.strip().lower(),
+            selected_pages=selected_pages_set,
         )
 
         return {
@@ -348,6 +496,7 @@ async def submit_print_job(
             "job_id": job_id,
             "printer": printer_used,
             "copies": copies,
+            "color_mode": color_mode,
             "filename": file.filename,
             "message": f"Sent {file.filename} to {printer_used}",
         }
@@ -383,6 +532,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             --success: #34C759;
             --border-color: #E5E5EA;
             --separator: #C6C6C8;
+            --segmented-bg: #E3E3E8;
             --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         }
 
@@ -398,6 +548,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 --success: #32D74B;
                 --border-color: #2C2C2E;
                 --separator: #38383A;
+                --segmented-bg: #2C2C2E;
             }
         }
 
@@ -421,14 +572,14 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         .container {
             width: 100%;
-            max-width: 440px;
+            max-width: 460px;
             display: flex;
             flex-direction: column;
-            gap: 20px;
+            gap: 16px;
         }
 
         header {
-            padding: 10px 4px 4px 4px;
+            padding: 10px 4px 0 4px;
         }
 
         header h1 {
@@ -493,7 +644,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         }
 
         .upload-zone {
-            padding: 32px 20px;
+            padding: 28px 20px;
             text-align: center;
             cursor: pointer;
             transition: background-color 0.15s ease;
@@ -509,16 +660,16 @@ HTML_CONTENT = """<!DOCTYPE html>
         }
 
         .upload-icon {
-            width: 52px;
-            height: 52px;
-            margin: 0 auto 12px;
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 10px;
             fill: var(--accent);
         }
 
         .upload-title {
             font-size: 17px;
             font-weight: 600;
-            margin-bottom: 6px;
+            margin-bottom: 4px;
         }
 
         .upload-subtitle {
@@ -528,14 +679,14 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         .file-preview {
             display: none;
-            padding: 16px;
+            padding: 14px 16px;
             align-items: center;
-            gap: 14px;
+            gap: 12px;
         }
 
         .file-icon {
-            width: 36px;
-            height: 36px;
+            width: 34px;
+            height: 34px;
             fill: var(--accent);
             flex-shrink: 0;
         }
@@ -573,6 +724,151 @@ HTML_CONTENT = """<!DOCTYPE html>
             opacity: 0.6;
         }
 
+        .preview-section {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .preview-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 4px;
+        }
+
+        .preview-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-secondary);
+        }
+
+        .preview-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .pill-btn {
+            background: none;
+            border: none;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--accent);
+            cursor: pointer;
+            padding: 4px 6px;
+        }
+
+        .pill-btn:active {
+            opacity: 0.6;
+        }
+
+        .preview-loader {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 24px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .mini-spinner {
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(0, 122, 255, 0.2);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.75s linear infinite;
+        }
+
+        .pages-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(95px, 1fr));
+            gap: 10px;
+        }
+
+        .page-card {
+            position: relative;
+            background: var(--card-bg);
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid transparent;
+            cursor: pointer;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+            transition: transform 0.1s ease, border-color 0.15s ease, opacity 0.15s ease;
+            user-select: none;
+        }
+
+        .page-card:active {
+            transform: scale(0.97);
+        }
+
+        .page-card.selected {
+            border-color: var(--accent);
+        }
+
+        .page-card.deselected {
+            opacity: 0.4;
+            filter: grayscale(80%);
+        }
+
+        .page-thumb {
+            width: 100%;
+            aspect-ratio: 1 / 1.414;
+            object-fit: cover;
+            display: block;
+            background-color: #FAFAFA;
+        }
+
+        .page-badge {
+            position: absolute;
+            bottom: 4px;
+            left: 4px;
+            background: rgba(0, 0, 0, 0.65);
+            color: #FFFFFF;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 6px;
+            backdrop-filter: blur(4px);
+        }
+
+        .check-badge {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+        }
+
+        .page-card.selected .check-badge {
+            background-color: var(--accent);
+            color: #FFFFFF;
+        }
+
+        .page-card.deselected .check-badge {
+            background-color: rgba(255, 255, 255, 0.85);
+            border: 2px solid var(--text-secondary);
+        }
+
+        .check-badge svg {
+            width: 13px;
+            height: 13px;
+            fill: currentColor;
+        }
+
+        .page-card.deselected .check-badge svg {
+            display: none;
+        }
+
         .settings-list {
             display: flex;
             flex-direction: column;
@@ -582,7 +878,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 14px 16px;
+            padding: 13px 16px;
             position: relative;
         }
 
@@ -605,7 +901,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             position: relative;
             display: flex;
             align-items: center;
-            max-width: 60%;
+            max-width: 65%;
         }
 
         .printer-select {
@@ -633,6 +929,33 @@ HTML_CONTENT = """<!DOCTYPE html>
             width: 12px;
             height: 12px;
             fill: var(--text-secondary);
+        }
+
+        .segmented-control {
+            display: flex;
+            background-color: var(--segmented-bg);
+            border-radius: 9px;
+            padding: 2px;
+            position: relative;
+        }
+
+        .segment-btn {
+            background: transparent;
+            border: none;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 500;
+            padding: 6px 14px;
+            border-radius: 7px;
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: background-color 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .segment-btn.active {
+            background-color: var(--card-bg);
+            font-weight: 600;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
         }
 
         .stepper {
@@ -673,7 +996,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         }
 
         .action-container {
-            margin-top: 10px;
+            margin-top: 4px;
         }
 
         .print-btn {
@@ -758,6 +1081,23 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <input type="file" id="fileInput" accept=".pdf,image/png,image/jpeg,image/jpg">
 
+        <div id="previewSection" class="preview-section" style="display: none;">
+            <div class="preview-header">
+                <span id="pagesCountLabel" class="preview-title">Pages (0 selected)</span>
+                <div class="preview-actions">
+                    <button type="button" id="selectAllBtn" class="pill-btn">Select All</button>
+                    <button type="button" id="deselectAllBtn" class="pill-btn">Deselect All</button>
+                </div>
+            </div>
+
+            <div id="previewLoader" class="card preview-loader">
+                <div class="mini-spinner"></div>
+                <span>Generating page previews...</span>
+            </div>
+
+            <div id="pagesGrid" class="pages-grid"></div>
+        </div>
+
         <div class="card settings-list">
             <div class="settings-row">
                 <span class="settings-label">Printer</span>
@@ -768,6 +1108,14 @@ HTML_CONTENT = """<!DOCTYPE html>
                     <svg class="select-chevron" viewBox="0 0 24 24">
                         <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
                     </svg>
+                </div>
+            </div>
+
+            <div class="settings-row">
+                <span class="settings-label">Color</span>
+                <div class="segmented-control">
+                    <button type="button" id="btnColor" class="segment-btn active" data-mode="color">Color</button>
+                    <button type="button" id="btnBw" class="segment-btn" data-mode="bw">B&W</button>
                 </div>
             </div>
 
@@ -796,7 +1144,15 @@ HTML_CONTENT = """<!DOCTYPE html>
         const fileNameEl = document.getElementById('fileName');
         const fileSizeEl = document.getElementById('fileSize');
         const clearFileBtn = document.getElementById('clearFileBtn');
+        const previewSection = document.getElementById('previewSection');
+        const previewLoader = document.getElementById('previewLoader');
+        const pagesGrid = document.getElementById('pagesGrid');
+        const pagesCountLabel = document.getElementById('pagesCountLabel');
+        const selectAllBtn = document.getElementById('selectAllBtn');
+        const deselectAllBtn = document.getElementById('deselectAllBtn');
         const printerSelect = document.getElementById('printerSelect');
+        const btnColor = document.getElementById('btnColor');
+        const btnBw = document.getElementById('btnBw');
         const stepDown = document.getElementById('stepDown');
         const stepUp = document.getElementById('stepUp');
         const copiesVal = document.getElementById('copiesVal');
@@ -809,10 +1165,14 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         let selectedFile = null;
         let copiesCount = 1;
+        let colorMode = 'color';
         let bannerTimeout = null;
+        let totalPages = 0;
+        let selectedPageIndices = new Set();
 
         const checkSvg = '<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>';
         const errorSvg = '<path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>';
+        const checkMiniSvg = '<svg viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>';
 
         function showBanner(type, message) {
             if (bannerTimeout) {
@@ -838,20 +1198,141 @@ HTML_CONTENT = """<!DOCTYPE html>
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
         }
 
+        function updateSelectionUI() {
+            pagesCountLabel.textContent = `Pages (${selectedPageIndices.size} of ${totalPages} selected)`;
+            if (!selectedFile || selectedPageIndices.size === 0) {
+                printBtn.disabled = true;
+                btnText.textContent = selectedPageIndices.size === 0 && selectedFile ? 'Select At Least 1 Page' : 'Print Document';
+            } else {
+                printBtn.disabled = false;
+                btnText.textContent = `Print ${selectedPageIndices.size} Page${selectedPageIndices.size > 1 ? 's' : ''}`;
+            }
+        }
+
+        function renderPageCards(thumbnails) {
+            pagesGrid.innerHTML = '';
+            totalPages = thumbnails.length;
+            selectedPageIndices = new Set();
+
+            thumbnails.forEach((src, idx) => {
+                const pageNumber = idx + 1;
+                selectedPageIndices.add(pageNumber);
+
+                const card = document.createElement('div');
+                card.className = 'page-card selected';
+                card.dataset.page = pageNumber;
+
+                const img = document.createElement('img');
+                img.className = 'page-thumb';
+                img.src = src;
+                img.alt = `Page ${pageNumber}`;
+
+                const badge = document.createElement('div');
+                badge.className = 'page-badge';
+                badge.textContent = `P. ${pageNumber}`;
+
+                const check = document.createElement('div');
+                check.className = 'check-badge';
+                check.innerHTML = checkMiniSvg;
+
+                card.appendChild(img);
+                card.appendChild(badge);
+                card.appendChild(check);
+
+                card.addEventListener('click', () => {
+                    if (selectedPageIndices.has(pageNumber)) {
+                        selectedPageIndices.delete(pageNumber);
+                        card.className = 'page-card deselected';
+                    } else {
+                        selectedPageIndices.add(pageNumber);
+                        card.className = 'page-card selected';
+                    }
+                    updateSelectionUI();
+                });
+
+                pagesGrid.appendChild(card);
+            });
+
+            previewLoader.style.display = 'none';
+            pagesGrid.style.display = 'grid';
+            updateSelectionUI();
+        }
+
+        async function loadPreview(file) {
+            previewSection.style.display = 'flex';
+            previewLoader.style.display = 'flex';
+            pagesGrid.style.display = 'none';
+            pagesGrid.innerHTML = '';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/preview', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    throw new Error(data.detail || 'Failed to render preview');
+                }
+                renderPageCards(data.pages || []);
+            } catch (err) {
+                previewLoader.style.display = 'none';
+                showBanner('error', 'Could not generate preview: ' + err.message);
+            }
+        }
+
         function updateFileUI() {
             if (selectedFile) {
                 uploadZone.style.display = 'none';
                 filePreview.style.display = 'flex';
                 fileNameEl.textContent = selectedFile.name;
                 fileSizeEl.textContent = formatBytes(selectedFile.size);
-                printBtn.disabled = false;
+                loadPreview(selectedFile);
             } else {
                 uploadZone.style.display = 'block';
                 filePreview.style.display = 'none';
+                previewSection.style.display = 'none';
+                pagesGrid.innerHTML = '';
+                selectedPageIndices.clear();
+                totalPages = 0;
                 fileInput.value = '';
                 printBtn.disabled = true;
+                btnText.textContent = 'Print Document';
             }
         }
+
+        selectAllBtn.addEventListener('click', () => {
+            const cards = pagesGrid.querySelectorAll('.page-card');
+            cards.forEach((card) => {
+                const pageNumber = parseInt(card.dataset.page, 10);
+                selectedPageIndices.add(pageNumber);
+                card.className = 'page-card selected';
+            });
+            updateSelectionUI();
+        });
+
+        deselectAllBtn.addEventListener('click', () => {
+            const cards = pagesGrid.querySelectorAll('.page-card');
+            cards.forEach((card) => {
+                card.className = 'page-card deselected';
+            });
+            selectedPageIndices.clear();
+            updateSelectionUI();
+        });
+
+        btnColor.addEventListener('click', () => {
+            colorMode = 'color';
+            btnColor.className = 'segment-btn active';
+            btnBw.className = 'segment-btn';
+        });
+
+        btnBw.addEventListener('click', () => {
+            colorMode = 'bw';
+            btnBw.className = 'segment-btn active';
+            btnColor.className = 'segment-btn';
+        });
 
         uploadZone.addEventListener('click', () => fileInput.click());
 
@@ -934,7 +1415,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         }
 
         printBtn.addEventListener('click', async () => {
-            if (!selectedFile) return;
+            if (!selectedFile || selectedPageIndices.size === 0) return;
 
             printBtn.disabled = true;
             spinner.style.display = 'inline-block';
@@ -946,6 +1427,10 @@ HTML_CONTENT = """<!DOCTYPE html>
                 formData.append('printer', printerSelect.value);
             }
             formData.append('copies', copiesCount);
+            formData.append('color_mode', colorMode);
+
+            const sortedPages = Array.from(selectedPageIndices).sort((a, b) => a - b);
+            formData.append('pages', sortedPages.join(','));
 
             try {
                 const res = await fetch('/api/print', {
@@ -966,9 +1451,11 @@ HTML_CONTENT = """<!DOCTYPE html>
                 printBtn.disabled = false;
             } finally {
                 spinner.style.display = 'none';
-                btnText.textContent = 'Print Document';
-                if (selectedFile) {
+                if (selectedFile && selectedPageIndices.size > 0) {
                     printBtn.disabled = false;
+                    btnText.textContent = `Print ${selectedPageIndices.size} Page${selectedPageIndices.size > 1 ? 's' : ''}`;
+                } else {
+                    btnText.textContent = 'Print Document';
                 }
             }
         });
@@ -985,5 +1472,5 @@ def index_page():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 5000))
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)

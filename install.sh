@@ -23,4 +23,4 @@ cp "$INSTALL_DIR/$SERVICE_NAME" "/etc/systemd/system/$SERVICE_NAME"
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 
-echo "Installation complete. Web Print Service is active on port 8000."
+echo "Installation complete. Web Print Service is active on port 5000."
