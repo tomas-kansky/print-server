@@ -40,7 +40,7 @@ app.add_middleware(
 def sanitize_printer_name(name: str) -> str:
     cleaned = name.strip()
     if not re.match(r"^[a-zA-Z0-9_\-\s\(\)\.]+$", cleaned):
-        raise ValueError("Invalid printer name characters.")
+        raise ValueError("Neplatné znaky v názvu tiskárny.")
     return cleaned
 
 def get_available_printers() -> List[str]:
@@ -156,7 +156,7 @@ def print_windows(
         if selected_pages is not None and 1 not in selected_pages:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="The single image page was unselected.",
+                detail="Byla odznačena jediná stránka obrázku.",
             )
         img = Image.open(file_path)
         if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
@@ -175,7 +175,7 @@ def print_windows(
     if not pages_to_print:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No pages selected for printing.",
+            detail="Nebyly vybrány žádné stránky k tisku.",
         )
 
     hDC = win32ui.CreateDC()
@@ -238,24 +238,24 @@ def print_linux_cups(
     except subprocess.TimeoutExpired:
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Print command timed out after 30 seconds.",
+            detail="Tiskový příkaz vypršel po 30 sekundách.",
         )
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="CUPS 'lp' executable was not found.",
+            detail="Příkaz CUPS 'lp' nebyl nalezen.",
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Execution error: {str(e)}",
+            detail=f"Chyba při spuštění tisku: {str(e)}",
         )
 
     if result.returncode != 0:
-        err_msg = result.stderr.strip() or result.stdout.strip() or "Unknown CUPS error"
+        err_msg = result.stderr.strip() or result.stdout.strip() or "Neznámá chyba CUPS"
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"CUPS error: {err_msg}",
+            detail=f"Chyba tiskového serveru: {err_msg}",
         )
 
 def execute_print(
@@ -270,7 +270,7 @@ def execute_print(
     if not target_printer:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No printer configured or detected on this host.",
+            detail="V systému nebyla nalezena žádná dostupná tiskárna.",
         )
 
     try:
@@ -284,7 +284,7 @@ def execute_print(
     if copies < 1 or copies > 99:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Number of copies must be between 1 and 99.",
+            detail="Počet kopií musí být v rozsahu 1 až 99.",
         )
 
     if IS_WINDOWS:
@@ -301,7 +301,7 @@ def execute_print(
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Windows print error: {str(e)}",
+                detail=f"Chyba tisku ve Windows: {str(e)}",
             )
     else:
         print_linux_cups(
@@ -322,8 +322,8 @@ def health_check():
 @app.get("/manifest.json")
 def get_manifest():
     manifest_data = {
-        "name": "Web Print",
-        "short_name": "Print",
+        "name": "Webový Tisk",
+        "short_name": "Tisk",
         "start_url": "/",
         "display": "standalone",
         "background_color": "#F2F2F7",
@@ -352,14 +352,14 @@ async def generate_preview(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No file selected.",
+            detail="Nebyl vybrán žádný soubor.",
         )
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported file extension '{file_ext}'.",
+            detail=f"Nepodporovaný formát souboru '{file_ext}'.",
         )
 
     DEFAULT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -376,7 +376,7 @@ async def generate_preview(file: UploadFile = File(...)):
                 if total_bytes > MAX_FILE_SIZE:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail="File exceeds maximum allowed size.",
+                        detail="Soubor překračuje maximální povolenou velikost 25 MB.",
                     )
                 buffer.write(chunk)
 
@@ -434,14 +434,14 @@ async def submit_print_job(
     if not file.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No file selected.",
+            detail="Nebyl vybrán žádný soubor.",
         )
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported file extension '{file_ext}'. Allowed formats: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+            detail=f"Nepodporovaný formát souboru '{file_ext}'. Povolené formáty: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
         )
 
     selected_pages_set: Optional[Set[int]] = None
@@ -454,7 +454,7 @@ async def submit_print_job(
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid pages parameter. Must be comma-separated integers.",
+                detail="Neplatný formát vybraných stránek.",
             )
 
     DEFAULT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -472,14 +472,14 @@ async def submit_print_job(
                 if total_bytes > MAX_FILE_SIZE:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE // (1024 * 1024)} MB.",
+                        detail="Soubor překračuje maximální povolenou velikost 25 MB.",
                     )
                 buffer.write(chunk)
 
         if total_bytes == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty.",
+                detail="Nahraný soubor je prázdný.",
             )
 
         printer_used = execute_print(
@@ -498,7 +498,7 @@ async def submit_print_job(
             "copies": copies,
             "color_mode": color_mode,
             "filename": file.filename,
-            "message": f"Sent {file.filename} to {printer_used}",
+            "message": f"Dokument {file.filename} byl odeslán na tiskárnu {printer_used}.",
         }
     finally:
         if temp_file_path.exists():
@@ -509,15 +509,15 @@ async def submit_print_job(
         await file.close()
 
 HTML_CONTENT = """<!DOCTYPE html>
-<html lang="en">
+<html lang="cs">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Web Print</title>
+    <title>Tiskový server</title>
     <link rel="manifest" href="/manifest.json">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <meta name="apple-mobile-web-app-title" content="Web Print">
+    <meta name="apple-mobile-web-app-title" content="Tisk">
     <meta name="theme-color" content="#F2F2F7">
     <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='115' fill='%23007AFF'/%3E%3Cpath fill='%23FFFFFF' d='M384 192V112H128v80H96v176h32v48h256v-48h32V192h-32zm-224-48h192v48H160v-48zm192 240H160V304h192v80zm32-112c-8.8 0-16-7.2-16-16s7.2-16 16-16 16 7.2 16 16-7.2 16-16 16z'/%3E%3C/svg%3E">
     <style>
@@ -1049,8 +1049,8 @@ HTML_CONTENT = """<!DOCTYPE html>
 <body>
     <div class="container">
         <header>
-            <h1>Print</h1>
-            <p>Self-hosted home print service</p>
+            <h1>Tisk</h1>
+            <p>Domácí tisková služba</p>
         </header>
 
         <div id="banner" class="banner">
@@ -1063,8 +1063,8 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <svg class="upload-icon" viewBox="0 0 24 24">
                     <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
                 </svg>
-                <div class="upload-title">Select Document or Photo</div>
-                <div class="upload-subtitle">PDF, PNG, JPG (up to 25 MB)</div>
+                <div class="upload-title">Vyberte dokument nebo fotku</div>
+                <div class="upload-subtitle">PDF, PNG, JPG (až 25 MB)</div>
             </div>
 
             <div id="filePreview" class="file-preview">
@@ -1075,7 +1075,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     <div id="fileName" class="file-name"></div>
                     <div id="fileSize" class="file-size"></div>
                 </div>
-                <button type="button" id="clearFileBtn" class="file-clear-btn">Remove</button>
+                <button type="button" id="clearFileBtn" class="file-clear-btn">Odebrat</button>
             </div>
         </div>
 
@@ -1083,16 +1083,16 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <div id="previewSection" class="preview-section" style="display: none;">
             <div class="preview-header">
-                <span id="pagesCountLabel" class="preview-title">Pages (0 selected)</span>
+                <span id="pagesCountLabel" class="preview-title">Stránky (0 vybráno)</span>
                 <div class="preview-actions">
-                    <button type="button" id="selectAllBtn" class="pill-btn">Select All</button>
-                    <button type="button" id="deselectAllBtn" class="pill-btn">Deselect All</button>
+                    <button type="button" id="selectAllBtn" class="pill-btn">Vybrat vše</button>
+                    <button type="button" id="deselectAllBtn" class="pill-btn">Zrušit výběr</button>
                 </div>
             </div>
 
             <div id="previewLoader" class="card preview-loader">
                 <div class="mini-spinner"></div>
-                <span>Generating page previews...</span>
+                <span>Generuji náhledy stránek...</span>
             </div>
 
             <div id="pagesGrid" class="pages-grid"></div>
@@ -1100,10 +1100,10 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <div class="card settings-list">
             <div class="settings-row">
-                <span class="settings-label">Printer</span>
+                <span class="settings-label">Tiskárna</span>
                 <div class="printer-select-wrapper">
                     <select id="printerSelect" class="printer-select">
-                        <option value="">Detecting...</option>
+                        <option value="">Hledám tiskárny...</option>
                     </select>
                     <svg class="select-chevron" viewBox="0 0 24 24">
                         <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
@@ -1112,15 +1112,15 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
 
             <div class="settings-row">
-                <span class="settings-label">Color</span>
+                <span class="settings-label">Barevnost</span>
                 <div class="segmented-control">
-                    <button type="button" id="btnColor" class="segment-btn active" data-mode="color">Color</button>
-                    <button type="button" id="btnBw" class="segment-btn" data-mode="bw">B&W</button>
+                    <button type="button" id="btnColor" class="segment-btn active" data-mode="color">Barevně</button>
+                    <button type="button" id="btnBw" class="segment-btn" data-mode="bw">Černobíle</button>
                 </div>
             </div>
 
             <div class="settings-row">
-                <span class="settings-label">Copies</span>
+                <span class="settings-label">Kopie</span>
                 <div class="stepper">
                     <button type="button" id="stepDown" class="stepper-btn">&minus;</button>
                     <span id="copiesVal" class="stepper-value">1</span>
@@ -1132,7 +1132,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div class="action-container">
             <button type="button" id="printBtn" class="print-btn" disabled>
                 <span class="spinner" id="spinner"></span>
-                <span id="btnText">Print Document</span>
+                <span id="btnText">Vytisknout dokument</span>
             </button>
         </div>
     </div>
@@ -1198,14 +1198,27 @@ HTML_CONTENT = """<!DOCTYPE html>
             return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
         }
 
+        function getPageWord(count) {
+            if (count === 1) return 'stránku';
+            if (count >= 2 && count <= 4) return 'stránky';
+            return 'stránek';
+        }
+
+        function getSelectedWord(count) {
+            if (count === 1) return 'vybrána';
+            if (count >= 2 && count <= 4) return 'vybrány';
+            return 'vybráno';
+        }
+
         function updateSelectionUI() {
-            pagesCountLabel.textContent = `Pages (${selectedPageIndices.size} of ${totalPages} selected)`;
-            if (!selectedFile || selectedPageIndices.size === 0) {
+            const count = selectedPageIndices.size;
+            pagesCountLabel.textContent = `Stránky (${count} z ${totalPages} ${getSelectedWord(count)})`;
+            if (!selectedFile || count === 0) {
                 printBtn.disabled = true;
-                btnText.textContent = selectedPageIndices.size === 0 && selectedFile ? 'Select At Least 1 Page' : 'Print Document';
+                btnText.textContent = count === 0 && selectedFile ? 'Vyberte alespoň 1 stránku' : 'Vytisknout dokument';
             } else {
                 printBtn.disabled = false;
-                btnText.textContent = `Print ${selectedPageIndices.size} Page${selectedPageIndices.size > 1 ? 's' : ''}`;
+                btnText.textContent = `Vytisknout ${count} ${getPageWord(count)}`;
             }
         }
 
@@ -1225,11 +1238,11 @@ HTML_CONTENT = """<!DOCTYPE html>
                 const img = document.createElement('img');
                 img.className = 'page-thumb';
                 img.src = src;
-                img.alt = `Page ${pageNumber}`;
+                img.alt = `Strana ${pageNumber}`;
 
                 const badge = document.createElement('div');
                 badge.className = 'page-badge';
-                badge.textContent = `P. ${pageNumber}`;
+                badge.textContent = `Str. ${pageNumber}`;
 
                 const check = document.createElement('div');
                 check.className = 'check-badge';
@@ -1274,12 +1287,12 @@ HTML_CONTENT = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (!res.ok) {
-                    throw new Error(data.detail || 'Failed to render preview');
+                    throw new Error(data.detail || 'Nepodařilo se vygenerovat náhled.');
                 }
                 renderPageCards(data.pages || []);
             } catch (err) {
                 previewLoader.style.display = 'none';
-                showBanner('error', 'Could not generate preview: ' + err.message);
+                showBanner('error', 'Nepodařilo se vytvořit náhled: ' + err.message);
             }
         }
 
@@ -1299,7 +1312,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 totalPages = 0;
                 fileInput.value = '';
                 printBtn.disabled = true;
-                btnText.textContent = 'Print Document';
+                btnText.textContent = 'Vytisknout dokument';
             }
         }
 
@@ -1385,7 +1398,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         async function fetchPrinters() {
             try {
                 const res = await fetch('/api/printers');
-                if (!res.ok) throw new Error('Could not retrieve printer list');
+                if (!res.ok) throw new Error('Nepodařilo se načíst seznam tiskáren.');
                 const data = await res.json();
                 printerSelect.innerHTML = '';
 
@@ -1393,24 +1406,24 @@ HTML_CONTENT = """<!DOCTYPE html>
                     data.printers.forEach((p) => {
                         const opt = document.createElement('option');
                         opt.value = p;
-                        opt.textContent = p + (p === data.default ? ' (Default)' : '');
+                        opt.textContent = p + (p === data.default ? ' (Výchozí)' : '');
                         if (p === data.default) opt.selected = true;
                         printerSelect.appendChild(opt);
                     });
                 } else if (data.default) {
                     const opt = document.createElement('option');
                     opt.value = data.default;
-                    opt.textContent = data.default + ' (Default)';
+                    opt.textContent = data.default + ' (Výchozí)';
                     opt.selected = true;
                     printerSelect.appendChild(opt);
                 } else {
                     const opt = document.createElement('option');
                     opt.value = '';
-                    opt.textContent = 'Auto Default';
+                    opt.textContent = 'Výchozí tiskárna';
                     printerSelect.appendChild(opt);
                 }
             } catch (err) {
-                printerSelect.innerHTML = '<option value="">Auto Default</option>';
+                printerSelect.innerHTML = '<option value="">Výchozí tiskárna</option>';
             }
         }
 
@@ -1419,7 +1432,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             printBtn.disabled = true;
             spinner.style.display = 'inline-block';
-            btnText.textContent = 'Sending to Printer...';
+            btnText.textContent = 'Odesílám na tiskárnu...';
 
             const formData = new FormData();
             formData.append('file', selectedFile);
@@ -1440,22 +1453,23 @@ HTML_CONTENT = """<!DOCTYPE html>
                 const result = await res.json();
 
                 if (!res.ok) {
-                    throw new Error(result.detail || 'Printing failed');
+                    throw new Error(result.detail || 'Tisk se nezdařil.');
                 }
 
-                showBanner('success', result.message || 'Job submitted successfully.');
+                showBanner('success', result.message || 'Tisková úloha byla úspěšně odeslána.');
                 selectedFile = null;
                 updateFileUI();
             } catch (err) {
-                showBanner('error', err.message || 'Error occurred while printing.');
+                showBanner('error', err.message || 'Při tisku došlo k chybě.');
                 printBtn.disabled = false;
             } finally {
                 spinner.style.display = 'none';
                 if (selectedFile && selectedPageIndices.size > 0) {
                     printBtn.disabled = false;
-                    btnText.textContent = `Print ${selectedPageIndices.size} Page${selectedPageIndices.size > 1 ? 's' : ''}`;
+                    const count = selectedPageIndices.size;
+                    btnText.textContent = `Vytisknout ${count} ${getPageWord(count)}`;
                 } else {
-                    btnText.textContent = 'Print Document';
+                    btnText.textContent = 'Vytisknout dokument';
                 }
             }
         });
