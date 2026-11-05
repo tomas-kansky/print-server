@@ -385,11 +385,11 @@ async def generate_preview(file: UploadFile = File(...)):
             import pypdfium2 as pdfium
             pdf = pdfium.PdfDocument(temp_path)
             for page in pdf:
-                pil_img = page.render(scale=0.45).to_pil()
+                pil_img = page.render(scale=0.8).to_pil()
                 if pil_img.mode != "RGB":
                     pil_img = pil_img.convert("RGB")
                 buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=75)
+                pil_img.save(buf, format="JPEG", quality=80)
                 b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 thumbnails.append(f"data:image/jpeg;base64,{b64}")
             pdf.close()
@@ -403,9 +403,9 @@ async def generate_preview(file: UploadFile = File(...)):
                 img = bg
             elif img.mode != "RGB":
                 img = img.convert("RGB")
-            img.thumbnail((400, 400))
+            img.thumbnail((1200, 1200))
             buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=75)
+            img.save(buf, format="JPEG", quality=80)
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
             thumbnails.append(f"data:image/jpeg;base64,{b64}")
 
@@ -821,6 +821,11 @@ HTML_CONTENT = """<!DOCTYPE html>
             object-fit: cover;
             display: block;
             background-color: #FAFAFA;
+            transition: filter 0.25s ease;
+        }
+
+        .pages-grid.bw-mode .page-thumb {
+            filter: grayscale(100%);
         }
 
         .page-badge {
@@ -834,19 +839,21 @@ HTML_CONTENT = """<!DOCTYPE html>
             padding: 2px 6px;
             border-radius: 6px;
             backdrop-filter: blur(4px);
+            pointer-events: none;
         }
 
         .check-badge {
             position: absolute;
             top: 6px;
             right: 6px;
-            width: 22px;
-            height: 22px;
+            width: 24px;
+            height: 24px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             transition: all 0.15s ease;
+            pointer-events: none;
         }
 
         .page-card.selected .check-badge {
@@ -867,6 +874,36 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         .page-card.deselected .check-badge svg {
             display: none;
+        }
+
+        .zoom-trigger-btn {
+            position: absolute;
+            top: 6px;
+            left: 6px;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background-color: rgba(0, 0, 0, 0.6);
+            border: none;
+            color: #FFFFFF;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+            z-index: 3;
+            transition: transform 0.1s ease, background-color 0.15s ease;
+        }
+
+        .zoom-trigger-btn:active {
+            transform: scale(0.9);
+            background-color: rgba(0, 0, 0, 0.9);
+        }
+
+        .zoom-trigger-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
         }
 
         .settings-list {
@@ -1041,6 +1078,119 @@ HTML_CONTENT = """<!DOCTYPE html>
             to { transform: rotate(360deg); }
         }
 
+        .zoom-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background-color: rgba(0, 0, 0, 0.88);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            display: flex;
+            flex-direction: column;
+            animation: zoomFadeIn 0.2s ease-out;
+        }
+
+        @keyframes zoomFadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .zoom-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: max(16px, env(safe-area-inset-top)) 20px 12px 20px;
+            color: #FFFFFF;
+        }
+
+        .zoom-title {
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        .zoom-close-btn {
+            background: rgba(255, 255, 255, 0.15);
+            border: none;
+            color: #FFFFFF;
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+        }
+
+        .zoom-close-btn:active {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .zoom-body {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px;
+            overflow: auto;
+        }
+
+        .zoom-img {
+            max-width: 92vw;
+            max-height: 72vh;
+            object-fit: contain;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+            background-color: #FFFFFF;
+            transition: filter 0.25s ease;
+        }
+
+        .zoom-modal.bw-mode .zoom-img {
+            filter: grayscale(100%);
+        }
+
+        .zoom-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px max(20px, env(safe-area-inset-bottom)) 20px;
+            gap: 10px;
+        }
+
+        .zoom-nav-btn {
+            background: rgba(255, 255, 255, 0.12);
+            border: none;
+            color: #FFFFFF;
+            padding: 8px 14px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+
+        .zoom-nav-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        .zoom-toggle-btn {
+            background: var(--accent);
+            border: none;
+            color: #FFFFFF;
+            padding: 9px 18px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+        }
+
+        .zoom-toggle-btn.deselected {
+            background: rgba(255, 255, 255, 0.2);
+            color: #E5E5EA;
+        }
+
         input[type="file"] {
             display: none;
         }
@@ -1137,6 +1287,21 @@ HTML_CONTENT = """<!DOCTYPE html>
         </div>
     </div>
 
+    <div id="zoomModal" class="zoom-modal" style="display: none;">
+        <div class="zoom-header">
+            <span id="zoomTitle" class="zoom-title">Detail stránky</span>
+            <button type="button" id="closeZoomBtn" class="zoom-close-btn">&times;</button>
+        </div>
+        <div class="zoom-body" id="zoomBody">
+            <img id="zoomImg" class="zoom-img" src="" alt="Detail stránky">
+        </div>
+        <div class="zoom-footer">
+            <button type="button" id="prevPageBtn" class="zoom-nav-btn">&larr; Předchozí</button>
+            <button type="button" id="toggleZoomSelectBtn" class="zoom-toggle-btn">Vytisknout tuto stranu</button>
+            <button type="button" id="nextPageBtn" class="zoom-nav-btn">Další &rarr;</button>
+        </div>
+    </div>
+
     <script>
         const fileInput = document.getElementById('fileInput');
         const uploadZone = document.getElementById('uploadZone');
@@ -1163,16 +1328,27 @@ HTML_CONTENT = """<!DOCTYPE html>
         const bannerIcon = document.getElementById('bannerIcon');
         const bannerText = document.getElementById('bannerText');
 
+        const zoomModal = document.getElementById('zoomModal');
+        const zoomTitle = document.getElementById('zoomTitle');
+        const zoomImg = document.getElementById('zoomImg');
+        const closeZoomBtn = document.getElementById('closeZoomBtn');
+        const prevPageBtn = document.getElementById('prevPageBtn');
+        const nextPageBtn = document.getElementById('nextPageBtn');
+        const toggleZoomSelectBtn = document.getElementById('toggleZoomSelectBtn');
+
         let selectedFile = null;
         let copiesCount = 1;
         let colorMode = 'color';
         let bannerTimeout = null;
         let totalPages = 0;
+        let currentThumbnails = [];
         let selectedPageIndices = new Set();
+        let currentZoomIndex = 0;
 
         const checkSvg = '<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>';
         const errorSvg = '<path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>';
         const checkMiniSvg = '<svg viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>';
+        const searchSvg = '<svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>';
 
         function showBanner(type, message) {
             if (bannerTimeout) {
@@ -1222,8 +1398,75 @@ HTML_CONTENT = """<!DOCTYPE html>
             }
         }
 
+        function syncZoomFooterUI() {
+            const pageNumber = currentZoomIndex + 1;
+            zoomTitle.textContent = `Strana ${pageNumber} z ${totalPages}`;
+            prevPageBtn.disabled = currentZoomIndex === 0;
+            nextPageBtn.disabled = currentZoomIndex === totalPages - 1;
+
+            if (selectedPageIndices.has(pageNumber)) {
+                toggleZoomSelectBtn.className = 'zoom-toggle-btn';
+                toggleZoomSelectBtn.textContent = 'Vybráno k tisku';
+            } else {
+                toggleZoomSelectBtn.className = 'zoom-toggle-btn deselected';
+                toggleZoomSelectBtn.textContent = 'Netisknout tuto stranu';
+            }
+        }
+
+        function openZoom(index) {
+            if (index < 0 || index >= currentThumbnails.length) return;
+            currentZoomIndex = index;
+            zoomImg.src = currentThumbnails[index];
+            syncZoomFooterUI();
+            zoomModal.style.display = 'flex';
+        }
+
+        function closeZoom() {
+            zoomModal.style.display = 'none';
+        }
+
+        closeZoomBtn.addEventListener('click', closeZoom);
+        zoomModal.addEventListener('click', (e) => {
+            if (e.target === zoomModal || e.target.id === 'zoomBody') {
+                closeZoom();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && zoomModal.style.display === 'flex') {
+                closeZoom();
+            }
+        });
+
+        prevPageBtn.addEventListener('click', () => {
+            if (currentZoomIndex > 0) {
+                openZoom(currentZoomIndex - 1);
+            }
+        });
+
+        nextPageBtn.addEventListener('click', () => {
+            if (currentZoomIndex < totalPages - 1) {
+                openZoom(currentZoomIndex + 1);
+            }
+        });
+
+        toggleZoomSelectBtn.addEventListener('click', () => {
+            const pageNumber = currentZoomIndex + 1;
+            const card = pagesGrid.querySelector(`[data-page="${pageNumber}"]`);
+            if (selectedPageIndices.has(pageNumber)) {
+                selectedPageIndices.delete(pageNumber);
+                if (card) card.className = 'page-card deselected';
+            } else {
+                selectedPageIndices.add(pageNumber);
+                if (card) card.className = 'page-card selected';
+            }
+            syncZoomFooterUI();
+            updateSelectionUI();
+        });
+
         function renderPageCards(thumbnails) {
             pagesGrid.innerHTML = '';
+            currentThumbnails = thumbnails;
             totalPages = thumbnails.length;
             selectedPageIndices = new Set();
 
@@ -1248,9 +1491,21 @@ HTML_CONTENT = """<!DOCTYPE html>
                 check.className = 'check-badge';
                 check.innerHTML = checkMiniSvg;
 
+                const zoomBtn = document.createElement('button');
+                zoomBtn.type = 'button';
+                zoomBtn.className = 'zoom-trigger-btn';
+                zoomBtn.title = 'Zvětšit náhled';
+                zoomBtn.innerHTML = searchSvg;
+
+                zoomBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    openZoom(idx);
+                });
+
                 card.appendChild(img);
                 card.appendChild(badge);
                 card.appendChild(check);
+                card.appendChild(zoomBtn);
 
                 card.addEventListener('click', () => {
                     if (selectedPageIndices.has(pageNumber)) {
@@ -1276,6 +1531,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             previewLoader.style.display = 'flex';
             pagesGrid.style.display = 'none';
             pagesGrid.innerHTML = '';
+            currentThumbnails = [];
 
             const formData = new FormData();
             formData.append('file', file);
@@ -1308,6 +1564,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 filePreview.style.display = 'none';
                 previewSection.style.display = 'none';
                 pagesGrid.innerHTML = '';
+                currentThumbnails = [];
                 selectedPageIndices.clear();
                 totalPages = 0;
                 fileInput.value = '';
@@ -1339,12 +1596,16 @@ HTML_CONTENT = """<!DOCTYPE html>
             colorMode = 'color';
             btnColor.className = 'segment-btn active';
             btnBw.className = 'segment-btn';
+            pagesGrid.classList.remove('bw-mode');
+            zoomModal.classList.remove('bw-mode');
         });
 
         btnBw.addEventListener('click', () => {
             colorMode = 'bw';
             btnBw.className = 'segment-btn active';
             btnColor.className = 'segment-btn';
+            pagesGrid.classList.add('bw-mode');
+            zoomModal.classList.add('bw-mode');
         });
 
         uploadZone.addEventListener('click', () => fileInput.click());
