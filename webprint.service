@@ -1,0 +1,20 @@
+[Unit]
+Description=Web Print Service
+After=network.target cups.service
+Wants=cups.service
+
+[Service]
+Type=simple
+User=pi
+Group=lp
+WorkingDirectory=/opt/print-server
+Environment=PYTHONUNBUFFERED=1
+Environment=PORT=8000
+Environment=PRINTER_NAME=
+ExecStart=/opt/print-server/venv/bin/python3 -m uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

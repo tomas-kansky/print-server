@@ -1,0 +1,14 @@
+services:
+  webprint:
+    build: .
+    container_name: webprint
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - CUPS_SERVER=/var/run/cups/cups.sock
+      - PRINTER_NAME=
+      - PORT=8000
+    volumes:
+      - /var/run/cups/cups.sock:/var/run/cups/cups.sock
+      - /tmp/print_jobs:/tmp/print_jobs
