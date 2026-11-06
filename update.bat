@@ -1,0 +1,9 @@
+@echo off
+cd /d "%~dp0"
+echo Pulling latest updates from GitHub...
+git pull
+echo Checking and updating dependencies...
+python -m pip install -r requirements.txt
+echo Starting updated server...
+python app.py
+pause
