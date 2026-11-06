@@ -26,6 +26,7 @@ ALLOWED_MIME_TYPES = {
 }
 DEFAULT_TEMP_DIR = Path(os.environ.get("TEMP_DIR", Path(tempfile.gettempdir()) / "print_jobs"))
 DEFAULT_PRINTER_ENV = os.environ.get("PRINTER_NAME", "").strip() or None
+CONFIG_FILE = Path(__file__).parent / "config.json"
 
 app = FastAPI(title="Web Print Server", docs_url=None, redoc_url=None)
 
@@ -36,6 +37,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"visible_printers": [], "default_printer": None}
+
+def save_config(config: dict) -> None:
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
 def sanitize_printer_name(name: str) -> str:
     cleaned = name.strip()
@@ -88,7 +102,7 @@ def get_available_printers() -> List[str]:
 
     return []
 
-def get_default_printer() -> Optional[str]:
+def get_system_default_printer() -> Optional[str]:
     if DEFAULT_PRINTER_ENV:
         return DEFAULT_PRINTER_ENV
 
@@ -266,7 +280,8 @@ def execute_print(
     color_mode: str = "color",
     selected_pages: Optional[Set[int]] = None,
 ) -> str:
-    target_printer = printer_name or get_default_printer()
+    cfg = load_config()
+    target_printer = printer_name or cfg.get("default_printer") or get_system_default_printer()
     if not target_printer:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -340,12 +355,66 @@ def get_manifest():
 
 @app.get("/api/printers")
 def list_printers():
-    printers = get_available_printers()
-    default_p = get_default_printer()
+    all_printers = get_available_printers()
+    cfg = load_config()
+    visible = cfg.get("visible_printers", [])
+
+    if visible:
+        filtered = [p for p in all_printers if p in visible]
+    else:
+        filtered = all_printers
+
+    default_p = cfg.get("default_printer")
+    if not default_p or default_p not in filtered:
+        sys_def = get_system_default_printer()
+        if sys_def and sys_def in filtered:
+            default_p = sys_def
+        elif filtered:
+            default_p = filtered[0]
+        else:
+            default_p = None
+
     return {
-        "printers": printers,
+        "printers": filtered,
         "default": default_p,
     }
+
+@app.get("/api/settings")
+def get_settings():
+    all_printers = get_available_printers()
+    cfg = load_config()
+    visible = cfg.get("visible_printers", [])
+    default_p = cfg.get("default_printer")
+
+    if not visible:
+        visible = all_printers
+
+    if not default_p:
+        default_p = get_system_default_printer()
+
+    return {
+        "all_printers": all_printers,
+        "visible_printers": visible,
+        "default_printer": default_p,
+    }
+
+@app.post("/api/settings")
+async def update_settings(data: dict):
+    visible = data.get("visible_printers", [])
+    default_p = data.get("default_printer")
+
+    if not isinstance(visible, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Neplatný formát viditelných tiskáren.",
+        )
+
+    cfg = {
+        "visible_printers": [str(p) for p in visible],
+        "default_printer": str(default_p) if default_p else None,
+    }
+    save_config(cfg)
+    return {"success": True, "message": "Nastavení tiskáren bylo úspěšně uloženo."}
 
 @app.post("/api/preview")
 async def generate_preview(file: UploadFile = File(...)):
@@ -582,6 +651,12 @@ HTML_CONTENT = """<!DOCTYPE html>
             padding: 10px 4px 0 4px;
         }
 
+        .header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
         header h1 {
             font-size: 34px;
             font-weight: 700;
@@ -592,6 +667,32 @@ HTML_CONTENT = """<!DOCTYPE html>
             font-size: 15px;
             color: var(--text-secondary);
             margin-top: 4px;
+        }
+
+        .settings-gear-btn {
+            background: var(--card-bg);
+            border: none;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+            transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+
+        .settings-gear-btn:active {
+            transform: scale(0.92);
+            opacity: 0.7;
+        }
+
+        .settings-gear-btn svg {
+            width: 22px;
+            height: 22px;
+            fill: currentColor;
         }
 
         .banner {
@@ -1078,7 +1179,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             to { transform: rotate(360deg); }
         }
 
-        .zoom-modal {
+        .zoom-modal, .config-modal {
             position: fixed;
             inset: 0;
             z-index: 9999;
@@ -1095,7 +1196,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             to { opacity: 1; }
         }
 
-        .zoom-header {
+        .zoom-header, .config-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -1103,12 +1204,12 @@ HTML_CONTENT = """<!DOCTYPE html>
             color: #FFFFFF;
         }
 
-        .zoom-title {
+        .zoom-title, .config-title {
             font-size: 17px;
             font-weight: 600;
         }
 
-        .zoom-close-btn {
+        .zoom-close-btn, .config-close-btn {
             background: rgba(255, 255, 255, 0.15);
             border: none;
             color: #FFFFFF;
@@ -1123,7 +1224,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             transition: background-color 0.15s ease;
         }
 
-        .zoom-close-btn:active {
+        .zoom-close-btn:active, .config-close-btn:active {
             background: rgba(255, 255, 255, 0.3);
         }
 
@@ -1191,6 +1292,143 @@ HTML_CONTENT = """<!DOCTYPE html>
             color: #E5E5EA;
         }
 
+        .config-body {
+            flex-grow: 1;
+            padding: 16px 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            max-width: 480px;
+            width: 100%;
+            margin: 0 auto;
+        }
+
+        .config-card {
+            background: var(--card-bg);
+            border-radius: 14px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+
+        .config-printer-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            position: relative;
+        }
+
+        .config-printer-row:not(:last-child)::after {
+            content: "";
+            position: absolute;
+            left: 16px;
+            right: 0;
+            bottom: 0;
+            height: 0.5px;
+            background-color: var(--separator);
+        }
+
+        .config-printer-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-grow: 1;
+            min-width: 0;
+        }
+
+        .config-printer-name {
+            font-size: 16px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .config-default-badge {
+            background: rgba(0, 122, 255, 0.15);
+            color: var(--accent);
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .config-default-badge.is-default {
+            background: var(--accent);
+            color: #FFFFFF;
+        }
+
+        .config-switch {
+            position: relative;
+            width: 46px;
+            height: 28px;
+            flex-shrink: 0;
+        }
+
+        .config-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .config-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: var(--segmented-bg);
+            border-radius: 28px;
+            transition: 0.2s;
+        }
+
+        .config-slider::before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #FFFFFF;
+            border-radius: 50%;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+            transition: 0.2s;
+        }
+
+        .config-switch input:checked + .config-slider {
+            background-color: var(--success);
+        }
+
+        .config-switch input:checked + .config-slider::before {
+            transform: translateX(18px);
+        }
+
+        .config-save-btn {
+            width: 100%;
+            height: 50px;
+            border-radius: 14px;
+            border: none;
+            background-color: var(--accent);
+            color: #FFFFFF;
+            font-family: inherit;
+            font-size: 17px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s ease;
+            margin-top: 10px;
+        }
+
+        .config-save-btn:active {
+            background-color: var(--accent-active);
+        }
+
         input[type="file"] {
             display: none;
         }
@@ -1199,8 +1437,15 @@ HTML_CONTENT = """<!DOCTYPE html>
 <body>
     <div class="container">
         <header>
-            <h1>Tisk</h1>
-            <p>Domácí tisková služba</p>
+            <div class="header-row">
+                <div>
+                    <h1>Tisk</h1>
+                    <p>Domácí tisková služba</p>
+                </div>
+                <button type="button" id="openSettingsBtn" class="settings-gear-btn" title="Nastavení tiskáren">
+                    <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                </button>
+            </div>
         </header>
 
         <div id="banner" class="banner">
@@ -1302,6 +1547,20 @@ HTML_CONTENT = """<!DOCTYPE html>
         </div>
     </div>
 
+    <div id="configModal" class="config-modal" style="display: none;">
+        <div class="config-header">
+            <span class="config-title">Nastavení tiskáren</span>
+            <button type="button" id="closeConfigBtn" class="config-close-btn">&times;</button>
+        </div>
+        <div class="config-body">
+            <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 4px;">
+                Zvolte tiskárny, které se mají nabízet uživatelům, a vyberte výchozí:
+            </div>
+            <div id="configPrintersList" class="config-card"></div>
+            <button type="button" id="saveConfigBtn" class="config-save-btn">Uložit nastavení</button>
+        </div>
+    </div>
+
     <script>
         const fileInput = document.getElementById('fileInput');
         const uploadZone = document.getElementById('uploadZone');
@@ -1336,6 +1595,12 @@ HTML_CONTENT = """<!DOCTYPE html>
         const nextPageBtn = document.getElementById('nextPageBtn');
         const toggleZoomSelectBtn = document.getElementById('toggleZoomSelectBtn');
 
+        const openSettingsBtn = document.getElementById('openSettingsBtn');
+        const configModal = document.getElementById('configModal');
+        const closeConfigBtn = document.getElementById('closeConfigBtn');
+        const configPrintersList = document.getElementById('configPrintersList');
+        const saveConfigBtn = document.getElementById('saveConfigBtn');
+
         let selectedFile = null;
         let copiesCount = 1;
         let colorMode = 'color';
@@ -1344,6 +1609,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         let currentThumbnails = [];
         let selectedPageIndices = new Set();
         let currentZoomIndex = 0;
+
+        let settingsAllPrinters = [];
+        let settingsVisiblePrinters = new Set();
+        let settingsDefaultPrinter = null;
 
         const checkSvg = '<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>';
         const errorSvg = '<path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>';
@@ -1433,8 +1702,9 @@ HTML_CONTENT = """<!DOCTYPE html>
         });
 
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && zoomModal.style.display === 'flex') {
-                closeZoom();
+            if (e.key === 'Escape') {
+                if (zoomModal.style.display === 'flex') closeZoom();
+                if (configModal.style.display === 'flex') closeConfig();
             }
         });
 
@@ -1687,6 +1957,109 @@ HTML_CONTENT = """<!DOCTYPE html>
                 printerSelect.innerHTML = '<option value="">Výchozí tiskárna</option>';
             }
         }
+
+        async function openConfig() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                settingsAllPrinters = data.all_printers || [];
+                settingsVisiblePrinters = new Set(data.visible_printers || []);
+                settingsDefaultPrinter = data.default_printer || (settingsAllPrinters[0] || null);
+                renderConfigPrintersList();
+                configModal.style.display = 'flex';
+            } catch (err) {
+                showBanner('error', 'Nepodařilo se načíst nastavení: ' + err.message);
+            }
+        }
+
+        function closeConfig() {
+            configModal.style.display = 'none';
+        }
+
+        function renderConfigPrintersList() {
+            configPrintersList.innerHTML = '';
+            if (settingsAllPrinters.length === 0) {
+                configPrintersList.innerHTML = '<div style="padding:16px; color:var(--text-secondary); text-align:center;">Nebyly nalezeny žádné tiskárny.</div>';
+                return;
+            }
+
+            settingsAllPrinters.forEach((printer) => {
+                const row = document.createElement('div');
+                row.className = 'config-printer-row';
+
+                const info = document.createElement('div');
+                info.className = 'config-printer-info';
+
+                const switchLabel = document.createElement('label');
+                switchLabel.className = 'config-switch';
+                const switchInput = document.createElement('input');
+                switchInput.type = 'checkbox';
+                switchInput.checked = settingsVisiblePrinters.has(printer);
+                switchInput.addEventListener('change', () => {
+                    if (switchInput.checked) {
+                        settingsVisiblePrinters.add(printer);
+                    } else {
+                        settingsVisiblePrinters.delete(printer);
+                    }
+                });
+                const switchSlider = document.createElement('span');
+                switchSlider.className = 'config-slider';
+                switchLabel.appendChild(switchInput);
+                switchLabel.appendChild(switchSlider);
+
+                const name = document.createElement('span');
+                name.className = 'config-printer-name';
+                name.textContent = printer;
+
+                info.appendChild(switchLabel);
+                info.appendChild(name);
+
+                const defaultBadge = document.createElement('span');
+                defaultBadge.className = 'config-default-badge' + (printer === settingsDefaultPrinter ? ' is-default' : '');
+                defaultBadge.textContent = printer === settingsDefaultPrinter ? 'Výchozí' : 'Nastavit výchozí';
+
+                defaultBadge.addEventListener('click', () => {
+                    settingsDefaultPrinter = printer;
+                    settingsVisiblePrinters.add(printer);
+                    renderConfigPrintersList();
+                });
+
+                row.appendChild(info);
+                row.appendChild(defaultBadge);
+                configPrintersList.appendChild(row);
+            });
+        }
+
+        openSettingsBtn.addEventListener('click', openConfig);
+        closeConfigBtn.addEventListener('click', closeConfig);
+        configModal.addEventListener('click', (e) => {
+            if (e.target === configModal) closeConfig();
+        });
+
+        saveConfigBtn.addEventListener('click', async () => {
+            if (settingsVisiblePrinters.size === 0) {
+                alert('Musíte nechat viditelnou alespoň jednu tiskárnu.');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        visible_printers: Array.from(settingsVisiblePrinters),
+                        default_printer: settingsDefaultPrinter,
+                    }),
+                });
+                const result = await res.json();
+                if (!res.ok) throw new Error(result.detail || 'Chyba při ukládání');
+                closeConfig();
+                showBanner('success', result.message || 'Nastavení uloženo.');
+                await fetchPrinters();
+            } catch (err) {
+                showBanner('error', 'Chyba při ukládání: ' + err.message);
+            }
+        });
 
         printBtn.addEventListener('click', async () => {
             if (!selectedFile || selectedPageIndices.size === 0) return;
